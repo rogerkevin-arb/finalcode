@@ -10,7 +10,6 @@ from tensorflow.keras.layers import Layer
 from skimage.morphology import skeletonize
 import base64
 from io import BytesIO
-from ultralytics import YOLO
 import gc
 
 import tensorflow.keras.backend as K
@@ -18,6 +17,8 @@ import matplotlib.cm as cm
 
 import hashlib
 import psutil, os
+
+import onnxruntime as ort
 
 # =========================
 # CONTROL DE MEMORIA
@@ -72,7 +73,15 @@ def mostrar_memoria():
 
 @st.cache_resource
 def cargar_detector_murosc():
-    return YOLO("best.pt")
+    session = ort.InferenceSession(
+        "best.onnx",
+        providers=["CPUExecutionProvider"]
+    )
+
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+
+    return session, input_name, output_name
 
 @st.cache_resource
 def cargar_clasificador_ladrillo():
@@ -87,8 +96,85 @@ check_memory(2200)
 
 # ======== Interfaz ========
 
-model_detector_murosc = cargar_detector_murosc()
+model_detector_murosc, input_name, output_name = cargar_detector_murosc()
 model_clasificador_ladrillo = cargar_clasificador_ladrillo()
+
+def detectar_muros(session, input_name, output_name, image, conf=0.25):
+
+    img = image.astype(np.float32) / 255.0
+
+    img = np.transpose(img, (2,0,1))
+
+    img = np.expand_dims(img, axis=0)
+
+    outputs = session.run(
+        [output_name],
+        {input_name: img}
+    )[0]
+
+    print(outputs.shape)
+    print(outputs[:, :, :5])
+
+    outputs = np.squeeze(outputs)
+
+    boxes = []
+    scores = []
+
+    for i in range(outputs.shape[1]):
+
+        x = outputs[0,i]
+        y = outputs[1,i]
+        w = outputs[2,i]
+        h = outputs[3,i]
+        score = outputs[4,i]
+
+        if score < conf:
+            continue
+
+        x1 = x - w/2
+        y1 = y - h/2
+        x2 = x + w/2
+        y2 = y + h/2
+
+        boxes.append([x1,y1,x2,y2])
+        scores.append(float(score))
+
+    if len(boxes)==0:
+        return [],[]
+
+    boxes_cv=[]
+
+    for b in boxes:
+
+        x1,y1,x2,y2=b
+
+        boxes_cv.append([
+            int(x1),
+            int(y1),
+            int(x2-x1),
+            int(y2-y1)
+        ])
+
+    idx=cv2.dnn.NMSBoxes(
+        boxes_cv,
+        scores,
+        conf,
+        0.45
+    )
+
+    final_boxes=[]
+    final_scores=[]
+
+    if len(idx)>0:
+
+        for i in idx.flatten():
+
+            final_boxes.append(boxes[i])
+
+            final_scores.append(scores[i])
+
+    return final_boxes,final_scores
+    
 
 st.title("Detección, Conteo y Clasificación Automática de Muros Confinados con Unidades Tubulares")
 
@@ -166,20 +252,23 @@ if uploaded_file is not None:
     # 4. DETECCIÓN YOLO
     # =========================
 
-    results = model_detector_murosc(img_1024, conf=conf_yolo)[0]
-
-    if len(results.boxes) == 0:
+    boxes_1024, conf_yolo_boxes = detectar_muros(
+        model_detector_murosc,
+        input_name,
+        output_name,
+        img_1024,
+        conf_yolo
+    )
+    
+    if len(boxes_1024) == 0:
+    
         st.warning("No se detectaron muros confinados en la imagen.")
-        st.image(img_1024, caption="Imagen procesada (sin detecciones)", use_container_width=True)
+        st.image(
+            img_1024,
+            caption="Imagen procesada (sin detecciones)",
+            use_container_width=True
+        )
         st.stop()
-
-
-    boxes_1024 = []
-    conf_yolo_boxes = []
-    for box in results.boxes:
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        boxes_1024.append([x1, y1, x2, y2])
-        conf_yolo_boxes.append(float(box.conf[0]))
     
     # =========================
     # 5. REESCALAR A LxL
