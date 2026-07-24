@@ -2,7 +2,7 @@ streamlit
 pillow
 numpy
 tensorflow==2.20.0
-opencv-python-headless
+ultralytics-opencv-headless
 matplotlib
 scikit-image
-ultralytics
+psutil
